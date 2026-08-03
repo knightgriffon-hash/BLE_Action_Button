@@ -23,7 +23,10 @@ void setup() {
     beacon.setMajor(0);
     beacon.setMinor(1);
 
-    pAdvertising->setAdvertisementData(beacon.getData());
+    BLEAdvertisementData advertisementData;
+    advertisementData.setManufacturerData(beacon.getData());
+
+    pAdvertising->setAdvertisementData(advertisementData);
     pAdvertising->start();
 
     Serial.println("BLE Beacon advertising started.");
@@ -33,7 +36,7 @@ void loop() {
     digitalWrite(LED_BUILTIN, HIGH);
     delay(100);
     digitalWrite(LED_BUILTIN, LOW);
-    
+
     Serial.println("Beacon sent!");
     delay(5000);
 }
