@@ -1,110 +1,81 @@
-#include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEServer.h>
-#include <BLEBeacon.h>
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_bt_device.h"
+#include "esp_gap_ble_api.h"
 
-// --- Определение пинов для ESP32-C6 ---
-#define BUTTON_PIN     9   // Кнопка (подтяжка к GND)
-#define LED_PIN        8   // Синий светодиод (внешний)
-#define BUZZER_PIN     10  // Зуммер
+#define BUTTON_PIN GPIO_NUM_9
+#define LED_PIN GPIO_NUM_8
+#define BUZZER_PIN GPIO_NUM_10
 
-// --- Настройки BLE ---
-#define DEVICE_NAME "AMP_ACTION_BTN"
-#define BEACON_UUID "12345678-1234-1234-1234-123456789abc"
+static const char *TAG = "BLE_BUTTON";
 
-// --- Защита от дребезга и двойного клика ---
-const unsigned long DEBOUNCE_DELAY = 100;  // Задержка для подавления дребезга (100 мс)
-const unsigned long BLOCK_DELAY = 200;    // Время блокировки после нажатия (для защиты от двойного клика)
+// --- BLE настройки ---
+static uint8_t adv_data[31] = {
+    0x02, 0x01, 0x06,                     // Flags
+    0x0F, 0x09, 'A','M','P','_','A','C','T','I','O','N','_','B','T','N' // Complete Local Name
+};
 
-BLEAdvertising *pAdvertising;
-
-// --- Переменные для временных меток ---
-unsigned long lastPressTime = 0;
-bool buttonBlocked = false;
-
-// --- Функция обработки нажатия ---
-void handleButtonPress() {
-    // Визуальный сигнал (синий светодиод)
-    digitalWrite(LED_PIN, HIGH);
-    
-    // Звуковой сигнал (зуммер)
-    tone(BUZZER_PIN, 1000, 150); // Частота 1000 Гц, длительность 150 мс
-    
-    // Отправка BLE Beacon (перезапуск рекламы)
-    pAdvertising->stop();
-    pAdvertising->start();
-
-    // Небольшая задержка, чтобы светодиод и звук были заметны
-    delay(150);
-    digitalWrite(LED_PIN, LOW);
-    
-    Serial.println("Button pressed! Beacon sent.");
+// --- Обработка нажатия ---
+void handle_button_press() {
+    gpio_set_level(LED_PIN, 1);
+    gpio_set_level(BUZZER_PIN, 1);
+    vTaskDelay(150 / portTICK_PERIOD_MS);
+    gpio_set_level(LED_PIN, 0);
+    gpio_set_level(BUZZER_PIN, 0);
+    ESP_LOGI(TAG, "Button pressed! Beacon sent.");
 }
 
-// --- Настройка BLE ---
-void setupBLE() {
-    BLEDevice::init(DEVICE_NAME);
-    BLEServer *pServer = BLEDevice::createServer();
-    pAdvertising = pServer->getAdvertising();
-
-    BLEBeacon beacon;
-    beacon.setManufacturerId(0x004C); // Apple ID для iBeacon
-    beacon.setProximityUUID(BLEUUID(BEACON_UUID));
-    beacon.setMajor(0);
-    beacon.setMinor(1);
-
-    pAdvertising->setAdvertisementData(beacon.getData());
-    pAdvertising->start();
+// --- BLE инициализация ---
+void ble_init() {
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
+    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BTDM));
+    ESP_ERROR_CHECK(esp_bluedroid_init());
+    ESP_ERROR_CHECK(esp_bluedroid_enable());
+    ESP_ERROR_CHECK(esp_ble_gap_register_callback(NULL));
+    
+    esp_ble_gap_set_device_name("AMP_ACTION_BTN");
+    esp_ble_gap_config_adv_data((esp_ble_adv_data_t *)adv_data);
+    esp_ble_gap_start_advertising(NULL);
 }
 
-// --- Основные функции ---
-void setup() {
-    Serial.begin(115200);
-    Serial.println("ESP32-C6 BLE Button ready. Waiting for press...");
-
-    // Настройка пинов
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
-    pinMode(LED_PIN, OUTPUT);
-    pinMode(BUZZER_PIN, OUTPUT);
-
-    // Инициализация BLE
-    setupBLE();
-
-    // Начальное состояние светодиода — выключен
-    digitalWrite(LED_PIN, LOW);
+// --- Настройка пинов ---
+void gpio_init() {
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << BUTTON_PIN) | (1ULL << LED_PIN) | (1ULL << BUZZER_PIN);
+    io_conf.mode = GPIO_MODE_INPUT_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&io_conf);
 }
 
-void loop() {
-    int buttonState = digitalRead(BUTTON_PIN);
-    unsigned long currentTime = millis();
-
-    // Проверка, не заблокирована ли кнопка для защиты от двойного клика
-    if (buttonBlocked) {
-        if (currentTime - lastPressTime > BLOCK_DELAY) {
-            buttonBlocked = false;
-        }
-        return;
-    }
-
-    // Обработка нажатия с подавлением дребезга (debounce)
-    if (buttonState == LOW) {
-        // Начальная задержка для подавления дребезга (100 мс)
-        delay(DEBOUNCE_DELAY);
-        
-        // Повторная проверка состояния кнопки
-        if (digitalRead(BUTTON_PIN) == LOW) {
-            // Нажатие подтверждено
-            handleButtonPress();
-            
-            // Блокируем кнопку для защиты от двойного клика
-            buttonBlocked = true;
-            lastPressTime = currentTime;
-            
-            // Ждём, пока кнопка будет физически отпущена
-            while (digitalRead(BUTTON_PIN) == LOW) {
-                delay(10);
+// --- Основная задача ---
+void button_task(void *pvParameter) {
+    while (1) {
+        if (gpio_get_level(BUTTON_PIN) == 0) {
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            if (gpio_get_level(BUTTON_PIN) == 0) {
+                handle_button_press();
+                while (gpio_get_level(BUTTON_PIN) == 0) {
+                    vTaskDelay(10 / portTICK_PERIOD_MS);
+                }
+                vTaskDelay(200 / portTICK_PERIOD_MS);
             }
         }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
+
+// --- Точка входа ---
+extern "C" void app_main() {
+    gpio_init();
+    ble_init();
+    xTaskCreate(button_task, "button_task", 4096, NULL, 5, NULL);
+    ESP_LOGI(TAG, "ESP32-C6 BLE Button ready. Waiting for press...");
